@@ -50,85 +50,65 @@ st.write(
     "from 0 to 9 in the white box below."
 )
 
+
 def preprocess_drawing(image_data):
-    """
-    Preprocess the drawing from the canvas to match the model's input format.
-    """
+    """Convert a canvas drawing to a 28x28 MNIST input."""
 
-    # Read the drawing from the canvas
-    image_array = np.array(
-        image_data,
-        dtype=np.uint8
-    )
+    pixels = np.asarray(image_data)
 
-    if image_array.ndim != 3:
-        raise ValueError(
-            "Please draw a digit on the canvas."
-        )
+    if pixels.ndim != 3 or pixels.shape[2] not in (3, 4):
+        raise ValueError("Invalid drawing image.")
 
-    # Convert to canvas to an image
-    image = Image.fromarray(image_array).convert("RGB")
+    pixels = pixels.astype(np.float32)
 
-    # Place the image in a white background
-    background = Image.new(
-        "RGBA",
-        image.size,
-        (255, 255, 255, 255)
-    )
+    if not np.isfinite(pixels).all():
+        raise ValueError("Invalid pixel values.")
 
-    image = Image.alpha_composite(
-        background,
-        image
-    ).convert("RGB")
+    # Support both 0-1 and 0-255 canvas data
+    if pixels.max() <= 1.0:
+        pixels *= 255.0
 
-    # Change black strokes to white and white background to black
-    image = ImageOps.grayscale(image)
-    image = ImageOps.invert(image)
+    pixels = np.clip(pixels, 0, 255)
+    rgb = pixels[:, :, :3]
 
-    # Remove tiny background variations by thresholding
-    image = image.point(
-            lambda pixel: pixel if pixel > 35 else 0
-        )
+    # Handle transparent backgrounds without PIL compositing
+    if pixels.shape[2] == 4:
+        alpha = pixels[:, :, 3:4] / 255.0
+        rgb = rgb * alpha + 255.0 * (1.0 - alpha)
 
-    bbox = image.getbbox()
+    # Convert dark strokes to bright strokes
+    gray = rgb.mean(axis=2)
+    ink = np.clip(255.0 - gray, 0, 255).astype(np.uint8)
+
+    ink[ink < 35] = 0
+
+    digit = Image.fromarray(ink)
+
+    bbox = digit.getbbox()
 
     if bbox is None:
-        raise ValueError(
-            "Please draw a digit before making a prediction."
-        )
+        raise ValueError("Please draw a digit first.")
 
-    # Crop the digit without changing its orientation
-    digit = image.crop(bbox)
+    # Crop and resize without distorting the shape
+    digit = digit.crop(bbox)
+    digit.thumbnail((20, 20), Image.Resampling.LANCZOS)
 
-    # Preserve the aspect ratio while resizing to 28x28 pixels
-    digit.thumbnail(
-        (28, 28),
-        Image.Resampling.LANCZOS
+    # Center on a 28x28 black background
+    processed = Image.new("L", (28, 28), 0)
+
+    processed.paste(
+        digit,
+        (
+            (28 - digit.width) // 2,
+            (28 - digit.height) // 2,
+        ),
     )
 
-    # Convert on a black 28x28 background
-    final_image = Image.new(
-        "L",
-        (28, 28),
-        color=0
-    )
+    array = np.asarray(processed, dtype=np.float32) / 255.0
+    model_input = array.reshape(1, 28, 28, 1)
 
-    x = (28 - digit.width) // 2
-    y = (28 - digit.height) // 2
+    return processed, model_input
 
-    final_image.paste(digit, (x, y))
-
-    # Normalize for the trained model
-    array = np.asarray(
-        final_image,
-        dtype=np.float32
-    ) / 255.0
-
-    model_input = array.reshape(
-        1, 28, 28, 1
-    )
-
-    return final_image, model_input
 
 if "Draw a Number"  not in st.session_state:
     st.session_state.canvas_key = 0
