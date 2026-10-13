@@ -1,4 +1,4 @@
-
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +19,16 @@ st.set_page_config(
 )
 
 st.title("Handwritten Digit Recognizer")
+
+st.caption(
+    "Preprocessing version: "
+    + (
+        "UPDATED"
+        if "dark_tail" in inspect.getsource(preprocess_image)
+        else "OLD"
+    )
+)
+
 st.write(
     "Upload an image containing a single handwritten digit "
     "from 0 to 9, and the trained CNN will predict the digit."
