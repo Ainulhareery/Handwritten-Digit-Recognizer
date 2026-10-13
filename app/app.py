@@ -1,17 +1,28 @@
-import inspect
+
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-import tensorflow as tf
-
-from PIL import Image, ImageOps
+from PIL import Image
 
 
-# -----------------------------
-# 1. Application configuration
-# -----------------------------
+# ---------------------------------
+# 1. Set up project imports
+# ---------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.preprocessing import preprocess_image
+from src.inference import predict_digit
+
+
+# ---------------------------------
+# 2. Streamlit configuration
+# ---------------------------------
 st.set_page_config(
     page_title="Handwritten Digit Recognizer",
     page_icon="🔢",
@@ -20,123 +31,37 @@ st.set_page_config(
 
 st.title("Handwritten Digit Recognizer")
 
-st.caption(
-    "Preprocessing version: "
-    + (
-        "UPDATED"
-        if "dark_tail" in inspect.getsource(preprocess_image)
-        else "OLD"
-    )
-)
-
 st.write(
-    "Upload an image containing a single handwritten digit "
-    "from 0 to 9, and the trained CNN will predict the digit."
+    "Upload an image containing one handwritten digit "
+    "from 0 to 9, and the trained CNN will predict it."
 )
 
-MODEL_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "models"
-    / "final_digit_model.keras"
+# Temporary verification
+st.caption(
+    f"Preprocessing module: {preprocess_image.__module__}"
 )
 
 
-# -----------------------------
-# 2. Load the trained model
-# -----------------------------
-@st.cache_resource
-def load_model():
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH}"
-        )
-
-    return tf.keras.models.load_model(
-        MODEL_PATH,
-        compile=False,
-    )
-
-
-# -----------------------------
-# 3. Preprocess the image
-# -----------------------------
-def preprocess_image(image):
-    # Convert to grayscale and improve contrast
-    image = ImageOps.grayscale(image)
-    image = ImageOps.autocontrast(image)
-
-    # MNIST uses bright digits on a dark background.
-    # Invert typical dark digits on a white background.
-    if np.asarray(image).mean() > 127:
-        image = ImageOps.invert(image)
-
-    # Remove background noise and locate the digit
-    image = image.point(
-        lambda pixel: 255 if pixel > 40 else 0
-    )
-
-    bbox = image.getbbox()
-
-    if bbox is None:
-        raise ValueError(
-            "No visible digit was detected. "
-            "Upload a clearer image."
-        )
-
-    image = image.crop(bbox)
-
-    # Add padding and place the digit on a square canvas
-    width, height = image.size
-    side = max(width, height) + 8
-
-    canvas = Image.new("L", (side, side), 0)
-    canvas.paste(
-        image,
-        ((side - width) // 2, (side - height) // 2),
-    )
-
-    # MNIST-style images use a 28x28 canvas.
-    # Resize the digit to fit within a 20x20 area.
-    canvas.thumbnail((20, 20), Image.Resampling.LANCZOS)
-
-    final_image = Image.new("L", (28, 28), 0)
-    final_image.paste(
-        canvas,
-        (
-            (28 - canvas.width) // 2,
-            (28 - canvas.height) // 2,
-        ),
-    )
-
-    # Normalize pixels and add batch/channel dimensions
-    array = np.asarray(
-        final_image,
-        dtype=np.float32,
-    ) / 255.0
-
-    array = array.reshape(1, 28, 28, 1)
-
-    return final_image, array
-
-
-# -----------------------------
-# 4. Upload an image
-# -----------------------------
+# ---------------------------------
+# 3. Upload image
+# ---------------------------------
 uploaded_file = st.file_uploader(
     "Upload a digit image",
     type=["png", "jpg", "jpeg"],
-    help="Use a clear image containing one digit only.",
+    help="Upload a clear image containing one digit.",
 )
 
 
-# -----------------------------
-# 5. Predict the digit
-# -----------------------------
+# ---------------------------------
+# 4. Process image and predict
+# ---------------------------------
 if uploaded_file is not None:
     try:
-        original_image = Image.open(uploaded_file)
+        original_image = Image.open(
+            uploaded_file
+        ).convert("RGB")
 
-        processed_image, input_array = preprocess_image(
+        processed_image, model_input = preprocess_image(
             original_image
         )
 
@@ -146,25 +71,21 @@ if uploaded_file is not None:
             st.subheader("Original image")
             st.image(
                 original_image,
-                use_container_width=True,
+                width="stretch",
             )
 
         with col2:
             st.subheader("Processed image")
             st.image(
                 processed_image,
-                use_container_width=True,
+                width="stretch",
             )
 
-        model = load_model()
+        predicted_digit, scores = predict_digit(
+            model_input
+        )
 
-        scores = model.predict(
-            input_array,
-            verbose=0,
-        )[0]
-
-        predicted_digit = int(np.argmax(scores))
-        top_score = float(scores[predicted_digit])
+        highest_score = float(scores[predicted_digit])
 
         st.divider()
         st.subheader("Prediction")
@@ -175,7 +96,7 @@ if uploaded_file is not None:
         )
 
         st.write(
-            f"Highest model score: **{top_score:.2%}**"
+            f"Highest model score: **{highest_score:.2%}**"
         )
 
         st.caption(
@@ -187,21 +108,20 @@ if uploaded_file is not None:
         results = pd.DataFrame(
             {
                 "Digit": list(range(10)),
-                "Model score": scores,
+                "Model score": np.asarray(scores),
             }
         ).set_index("Digit")
 
         st.subheader("Scores for all digits")
         st.bar_chart(results)
 
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, TypeError) as error:
         st.error(f"Could not process this image: {error}")
 
     except Exception as error:
         st.error(
-            "The prediction could not be completed. "
-            "Check the model file and application "
-            "dependencies in the deployment environment."
+            "Prediction failed. Check the model and "
+            "application configuration."
         )
         st.exception(error)
 
@@ -211,8 +131,13 @@ else:
         "The application recognizes one digit at a time."
     )
 
+
+# ---------------------------------
+# 5. Model information
+# ---------------------------------
 st.divider()
+
 st.caption(
-    "Model benchmark: 99.57% accuracy on the MNIST test set. "
-    "Real-world image performance may differ."
+    "Model benchmark: 99.57% accuracy on the MNIST "
+    "test set. Real-world image performance may differ."
 )
