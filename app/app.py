@@ -151,8 +151,7 @@ canvas = st_canvas(
 if st.button(
     "Recognize My Drawing",
     type="primary",
-    key=(draw_button := st.session_state.canvas_key),
-    icon="wand-magic-sparkles"
+    key=(draw_button := st.session_state.canvas_key)
 ):
     try:
         if canvas.image_data is None:
@@ -205,8 +204,7 @@ if st.button(
 if st.button(
     "Clear Drawing",
     type="secondary",
-    key=(clear_button := st.session_state.canvas_key),
-    icon="eraser"
+    key=(clear_button := st.session_state.canvas_key)
 ):
     st.session_state.canvas_key += 1
     st.rerun()
