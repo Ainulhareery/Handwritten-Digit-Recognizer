@@ -149,9 +149,10 @@ canvas = st_canvas(
 
 # Recognize the digit when the user clicks the "Predict" button
 if st.button(
-    "Recognize My Drawing",
+     "Recognize My Drawing",
     type="primary",
-    key=(draw_button := st.session_state.canvas_key)
+    icon="✨",
+    key="draw_predict",
 ):
     try:
         if canvas.image_data is None:
@@ -204,7 +205,8 @@ if st.button(
 if st.button(
     "Clear Drawing",
     type="secondary",
-    key=(clear_button := st.session_state.canvas_key)
+    icon="🧽",
+    key="clear_drawing",
 ):
     st.session_state.canvas_key += 1
     st.rerun()
