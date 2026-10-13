@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 # ---------------------------------
@@ -57,13 +57,40 @@ uploaded_file = st.file_uploader(
 # ---------------------------------
 if uploaded_file is not None:
     try:
-        original_image = Image.open(
-            uploaded_file
+        
+        # Load image and correct camera orientation metadata
+        original_image = ImageOps.exif_transpose(
+            Image.open(uploaded_file)
         ).convert("RGB")
 
+        # Let the user correct the image orientation
+        rotation = st.selectbox(
+            "Rotate image to make the digit upright",
+            options=[
+                "No rotation",
+                "90° clockwise",
+                "90° counterclockwise",
+                "180°",
+            ],
+        )
+
+        rotation_angles = {
+            "No rotation": 0,
+            "90° clockwise": -90,
+            "90° counterclockwise": 90,
+            "180°": 180,
+        }
+
+        original_image = original_image.rotate(
+            rotation_angles[rotation],
+            expand=True,
+        )
+
+        # Preprocess the correctly oriented image
         processed_image, model_input = preprocess_image(
             original_image
         )
+
 
         col1, col2 = st.columns(2)
 
