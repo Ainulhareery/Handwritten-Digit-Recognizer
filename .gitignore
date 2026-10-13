@@ -1,0 +1,37 @@
+
+# ==========================================
+# Handwritten Digit Recognizer - Git Ignore
+# ==========================================
+
+# Python virtual environment
+.venv/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+
+# Testing and coverage files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# VS Code and IDE settings
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary files
+*.log
+*.tmp
