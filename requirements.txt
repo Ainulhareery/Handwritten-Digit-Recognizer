@@ -4,3 +4,4 @@ tensorflow==2.21.0
 numpy
 Pillow
 pandas
+streamlit-drawable-canvas[image]==0.13.0
