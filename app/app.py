@@ -33,24 +33,36 @@ st.set_page_config(
 st.title("Handwritten Digit Recognizer")
 
 st.write(
-    "Upload an image containing one handwritten digit "
-    "from 0 to 9, and the trained CNN will predict it."
-)
-
-# Temporary verification
-st.caption(
-    f"Preprocessing module: {preprocess_image.__module__}"
-)
-
-# Allow user to draw a digit on a canvas
-st.subheader("Draw a Number")
-
-st.write(
-    "Use your mouse or finger to draw any number "
-    "from 0 to 9 in the white box below."
+    "Draw or upload a handwritten digit from 0 to 9 "
+    "and let the AI recognize it."
 )
 
 
+# ---------------------------------
+# 3. Drawing canvas session state
+# ---------------------------------
+
+# Initialize the canvas counter only once
+if "canvas_key" not in st.session_state:
+    st.session_state.canvas_key = 0
+
+# Store the drawing prediction across reruns
+if "drawing_result" not in st.session_state:
+    st.session_state.drawing_result = None
+
+
+def reset_drawing():
+    """
+    Reset the drawing canvas and remove
+    the previous prediction.
+    """
+    st.session_state.canvas_key += 1
+    st.session_state.drawing_result = None
+
+
+# ---------------------------------
+# 4. Preprocess drawing
+# ---------------------------------
 def preprocess_drawing(image_data):
     """Convert a canvas drawing to a 28x28 MNIST input."""
 
@@ -71,7 +83,7 @@ def preprocess_drawing(image_data):
     pixels = np.clip(pixels, 0, 255)
     rgb = pixels[:, :, :3]
 
-    # Handle transparent backgrounds without PIL compositing
+    # Handle transparent backgrounds
     if pixels.shape[2] == 4:
         alpha = pixels[:, :, 3:4] / 255.0
         rgb = rgb * alpha + 255.0 * (1.0 - alpha)
@@ -89,11 +101,13 @@ def preprocess_drawing(image_data):
     if bbox is None:
         raise ValueError("Please draw a digit first.")
 
-    # Crop and resize without distorting the shape
+    # Crop while preserving orientation
     digit = digit.crop(bbox)
+
+    # Resize while maintaining aspect ratio
     digit.thumbnail((20, 20), Image.Resampling.LANCZOS)
 
-    # Center on a 28x28 black background
+    # Center the digit on a 28x28 black canvas
     processed = Image.new("L", (28, 28), 0)
 
     processed.paste(
@@ -104,16 +118,27 @@ def preprocess_drawing(image_data):
         ),
     )
 
-    array = np.asarray(processed, dtype=np.float32) / 255.0
+    # Normalize pixels for the CNN
+    array = np.asarray(
+        processed,
+        dtype=np.float32,
+    ) / 255.0
+
     model_input = array.reshape(1, 28, 28, 1)
 
     return processed, model_input
 
 
-if "Draw a Number"  not in st.session_state:
-    st.session_state.canvas_key = 0
+# ---------------------------------
+# 5. Drawing interface
+# ---------------------------------
+st.subheader("✍️ Draw a Number")
 
-# Display the drawing canvas
+st.write(
+    "Use your mouse or finger to draw a single digit "
+    "from 0 to 9 in the white box below."
+)
+
 canvas = st_canvas(
     fill_color="rgba(255, 255, 255, 0)",
     stroke_width=15,
@@ -124,12 +149,15 @@ canvas = st_canvas(
     width=300,
     height=300,
     drawing_mode="freedraw",
-    key=f"canvas_{st.session_state.canvas_key}",
+    key=f"digit_canvas_{st.session_state.canvas_key}",
 )
 
-# Recognize the digit when the user clicks the "Predict" button
+
+# ---------------------------------
+# 6. Recognize drawing
+# ---------------------------------
 if st.button(
-     "Recognize My Drawing",
+    "Recognize My Drawing",
     type="primary",
     icon="✨",
     key="draw_predict",
@@ -140,63 +168,82 @@ if st.button(
                 "Please draw a digit on the canvas."
             )
 
-        else:
-            final_image, model_input = preprocess_drawing(
-                canvas.image_data
-            )
-
-            predicted_digit, scores = predict_digit(
-                model_input
-            )
-
-            st.success(
-                f"The model predicts your drawing as: **{predicted_digit}**"
-            )
-
-            st.image(
-                final_image,
-                caption="Processed drawing",
-                width=100,
-            )
-
-            st.write(
-                f"Highest model score: **{float(scores[predicted_digit]):.2%}**"
-            )
-
-            st.caption(
-                "This score is the model's softmax output, "
-                "not a calibrated probability or a guarantee "
-                "that the prediction is correct."
-            )
-
-    except ValueError as error:
-        st.warning(
-            str(error)
+        processed, model_input = preprocess_drawing(
+            canvas.image_data
         )
 
+        predicted_digit, scores = predict_digit(
+            model_input
+        )
+
+        # Save the result so it remains visible
+        st.session_state.drawing_result = {
+            "digit": predicted_digit,
+            "score": float(scores[predicted_digit]),
+            "image": processed,
+        }
+
+    except ValueError as error:
+        st.session_state.drawing_result = None
+        st.warning(str(error))
+
     except Exception as error:
+        st.session_state.drawing_result = None
         st.error(
             "Could not process the drawing. "
             "Please try again."
         )
         st.exception(error)
 
-# Clear the canvas when the user clicks the "Clear" button
-if st.button(
+
+# ---------------------------------
+# 7. Display saved drawing result
+# ---------------------------------
+if st.session_state.drawing_result is not None:
+
+    result = st.session_state.drawing_result
+
+    st.success(
+        f"The AI predicts your drawing is: "
+        f"**{result['digit']}**"
+    )
+
+    st.image(
+        result["image"],
+        caption="What the AI sees",
+        width=150,
+    )
+
+    st.write(
+        f"Highest model score: "
+        f"**{result['score']:.2%}**"
+    )
+
+    st.caption(
+        "This score is the model's softmax output, "
+        "not a calibrated probability or a guarantee "
+        "that the prediction is correct."
+    )
+
+
+# ---------------------------------
+# 8. Clear drawing and prediction
+# ---------------------------------
+st.button(
     "Clear Drawing",
     type="secondary",
     icon="🧽",
     key="clear_drawing",
-):
-    st.session_state.canvas_key += 1
-    st.rerun()
+    on_click=reset_drawing,
+)
+
 
 st.divider()
-st.subheader("Or Upload an Image")
+st.subheader("📷 Or Upload an Image")
 
 
 # ---------------------------------
-# 3. Upload image
+# 9. Upload image
 # ---------------------------------
 uploaded_file = st.file_uploader(
     "Upload a digit image",
@@ -206,17 +253,17 @@ uploaded_file = st.file_uploader(
 
 
 # ---------------------------------
-# 4. Process image and predict
+# 10. Process uploaded image
 # ---------------------------------
 if uploaded_file is not None:
     try:
-        
-        # Load image and correct camera orientation metadata
+
+        # Correct camera orientation metadata
         original_image = ImageOps.exif_transpose(
             Image.open(uploaded_file)
         ).convert("RGB")
 
-        # Let the user correct the image orientation
+        # Allow the user to rotate their photo
         rotation = st.selectbox(
             "Rotate image to make the digit upright",
             options=[
@@ -239,11 +286,11 @@ if uploaded_file is not None:
             expand=True,
         )
 
-        # Preprocess the correctly oriented image
+        # Existing preprocessing handles
+        # background inversion and digit extraction
         processed_image, model_input = preprocess_image(
             original_image
         )
-
 
         col1, col2 = st.columns(2)
 
@@ -261,6 +308,7 @@ if uploaded_file is not None:
                 width="stretch",
             )
 
+        # Predict using the existing CNN
         predicted_digit, scores = predict_digit(
             model_input
         )
@@ -300,8 +348,8 @@ if uploaded_file is not None:
 
     except Exception as error:
         st.error(
-            "Prediction failed. Check the model and "
-            "application configuration."
+            "Prediction failed. Check the model "
+            "and application configuration."
         )
         st.exception(error)
 
@@ -313,7 +361,7 @@ else:
 
 
 # ---------------------------------
-# 5. Model information
+# 11. Model information
 # ---------------------------------
 st.divider()
 
