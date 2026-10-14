@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
 from streamlit_drawable_canvas import st_canvas
+from src.multi_digit import recognize_number
 
 
 # ---------------------------------
@@ -358,6 +359,118 @@ else:
         "Upload an image above to begin. "
         "The application recognizes one digit at a time."
     )
+
+# ---------------------------------
+# Experimental: multi-digit recognition
+# ---------------------------------
+st.divider()
+st.subheader("🔢 Recognize a Handwritten Number (Experimental)")
+st.caption(
+    "Supports 2–5 clearly separated digits. Touching digits, "
+    "overlapping handwriting and complex photographs may fail."
+)
+
+if "multi_canvas_version" not in st.session_state:
+    st.session_state.multi_canvas_version = 0
+if "multi_result" not in st.session_state:
+    st.session_state.multi_result = None
+
+
+def clear_multi_digit():
+    st.session_state.multi_canvas_version += 1
+    st.session_state.multi_result = None
+
+
+multi_mode = st.radio(
+    "Choose an input method",
+    ["Draw a number", "Upload a number"],
+    horizontal=True,
+    key="multi_mode",
+)
+
+multi_source = None
+if multi_mode == "Draw a number":
+    drawn_number = st_canvas(
+        fill_color="rgba(255, 255, 255, 0)",
+        stroke_width=14,
+        stroke_color="#000000",
+        background_color="#FFFFFF",
+        drawing_mode="freedraw",
+        update_streamlit=True,
+        return_image_data=True,
+        width=420,
+        height=160,
+        key=f"multi_canvas_{st.session_state.multi_canvas_version}",
+    )
+    if drawn_number.image_data is not None:
+        multi_source = Image.fromarray(
+            np.asarray(drawn_number.image_data, dtype=np.uint8)
+        )
+else:
+    number_upload = st.file_uploader(
+        "Upload a photo showing 2–5 separated handwritten digits",
+        type=["png", "jpg", "jpeg"],
+        key=f"multi_upload_{st.session_state.multi_canvas_version}",
+    )
+    if number_upload is not None:
+        multi_source = ImageOps.exif_transpose(
+            Image.open(number_upload)
+        ).convert("RGB")
+        multi_rotation = st.selectbox(
+            "Rotate the number to make it upright",
+            ["No rotation", "90° clockwise", "90° counterclockwise", "180°"],
+            key="multi_rotation",
+        )
+        angles = {
+            "No rotation": 0,
+            "90° clockwise": -90,
+            "90° counterclockwise": 90,
+            "180°": 180,
+        }
+        multi_source = multi_source.rotate(
+            angles[multi_rotation], expand=True
+        )
+
+if st.button("Recognize Number", type="primary", key="multi_predict"):
+    st.session_state.multi_result = None
+    if multi_source is None:
+        st.warning("Draw a number or upload an image first.")
+    else:
+        try:
+            number, details = recognize_number(
+                multi_source, predict_fn=predict_digit, max_digits=5
+            )
+            st.session_state.multi_result = {
+                "number": number,
+                "digits": details,
+                "mode": multi_mode,
+            }
+        except ValueError as error:
+            st.warning(str(error))
+        except Exception as error:
+            st.error("Could not recognize this number.")
+            st.exception(error)
+
+result = st.session_state.multi_result
+if result is not None and result["mode"] == multi_mode:
+    st.success(f"Recognized number: **{result['number']}**")
+    st.image(
+        [item["processed"] for item in result["digits"]],
+        caption=[f"Digit {i+1}: {item['digit']}" for i, item in enumerate(result["digits"])],
+        width=90,
+    )
+    st.caption(
+        "This is an experimental multi-digit prediction. "
+        "Scores from the CNN are not calibrated probabilities."
+    )
+
+st.button(
+    "Clear Number",
+    type="secondary",
+    icon="🧽",
+    key="multi_clear",
+    on_click=clear_multi_digit,
+)
 
 
 # ---------------------------------
