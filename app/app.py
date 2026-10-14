@@ -7,7 +7,6 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
 from streamlit_drawable_canvas import st_canvas
-from src.multi_digit import recognize_number
 
 
 # ---------------------------------
@@ -20,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.preprocessing import preprocess_image
 from src.inference import predict_digit
+from src.multi_digit import recognize_number
 
 
 # ---------------------------------
