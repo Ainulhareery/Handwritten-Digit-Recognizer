@@ -478,6 +478,7 @@ if st.button("Recognize Number", type="primary", key="multi_predict"):
                 predict_fn=predict_digit,
                 max_digits=5,
                 expected_digits=expected_count,
+                canvas_mode=multi_mode == "Draw a number",
             )
 
             # Draw bounding boxes only once
