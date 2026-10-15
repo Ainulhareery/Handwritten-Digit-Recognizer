@@ -29,11 +29,98 @@ def _prepare(image):
     return np.asarray(gray, dtype=np.uint8), (ow, oh)
 
 
+def _segment_blue_ink(image, max_digits, expected_digits):
+    """Use strongly blue pen strokes when they can be isolated confidently.
+
+    A color difference helps separate blue handwriting from pale blue ruling.
+    If the evidence is ambiguous, fall back to grayscale segmentation.
+    """
+    if image.mode not in ("RGB", "RGBA", "P"):
+        return None
+
+    rgb = image.convert("RGB")
+    original_width, original_height = rgb.size
+    rgb.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+    pixels = np.asarray(rgb, dtype=np.int16)
+    height, width = pixels.shape[:2]
+
+    red = pixels[:, :, 0]
+    green = pixels[:, :, 1]
+    blue = pixels[:, :, 2]
+
+    # Reject pale paper ruling while retaining much darker blue pen strokes.
+    blue_excess = blue - red
+    mask = np.uint8((blue_excess >= 22) & (blue - green >= 12)) * 255
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    min_area = max(28, round(width * height * 0.00008))
+    candidates = []
+    for index in range(1, count):
+        x, y, bw, bh, area = (int(value) for value in stats[index])
+        if area < min_area or bh < max(10, height * 0.025):
+            continue
+        if bw < 4 or bw > width * 0.32 or bh > height * 0.46:
+            continue
+        candidates.append((x, y, bw, bh, area))
+
+    if not candidates:
+        return None
+
+    # Only take a coherent line of similarly sized handwriting components.
+    candidates.sort(key=lambda candidate: candidate[4], reverse=True)
+    seed = candidates[0]
+    seed_center = seed[1] + seed[3] / 2
+    grouped = [
+        part
+        for part in candidates
+        if abs(part[1] + part[3] / 2 - seed_center) <= max(16, 0.65 * seed[3])
+        and part[3] >= 0.42 * seed[3]
+        and part[3] <= 2.2 * seed[3]
+        and part[4] >= 0.12 * seed[4]
+    ]
+    grouped.sort(key=lambda part: part[0])
+
+    if not 2 <= len(grouped) <= max_digits:
+        return None
+    if expected_digits is not None and len(grouped) != expected_digits:
+        return None
+
+    # A large gap usually means unrelated writing or spurious image regions.
+    heights = [part[3] for part in grouped]
+    typical_height = float(np.median(heights))
+    for first, second in zip(grouped[:-1], grouped[1:]):
+        if second[0] - (first[0] + first[2]) > typical_height * 1.5:
+            return None
+
+    sx, sy = original_width / width, original_height / height
+    result = []
+    for x, y, bw, bh, _ in grouped:
+        area = mask[y : y + bh, x : x + bw]
+        pad = max(5, round(0.23 * max(bw, bh)))
+        crop = np.full((bh + 2 * pad, bw + 2 * pad), 255, dtype=np.uint8)
+        crop[pad : pad + bh, pad : pad + bw] = 255 - area
+        result.append(
+            DigitSegment(
+                Image.fromarray(crop),
+                (
+                    round(x * sx),
+                    round(y * sy),
+                    round((x + bw) * sx),
+                    round((y + bh) * sy),
+                ),
+            )
+        )
+    return result
+
+
 def segment_digits(image, *, max_digits=5, expected_digits=None):
     if not 2 <= max_digits <= 20:
         raise ValueError("max_digits must be between 2 and 20.")
     if expected_digits is not None and not 2 <= expected_digits <= max_digits:
         raise ValueError("expected_digits must be between 2 and max_digits.")
+    color_segments = _segment_blue_ink(image, max_digits, expected_digits)
+    if color_segments is not None:
+        return color_segments
     gray, (ow, oh) = _prepare(image)
     h, w = gray.shape
     if h < 24 or w < 24:
