@@ -30,10 +30,10 @@ def _prepare(image):
 
 
 def _segment_blue_ink(image, max_digits, expected_digits):
-    """Use strongly blue pen strokes when they can be isolated confidently.
+    """Find blue/purple ink components at several contrast levels.
 
-    A color difference helps separate blue handwriting from pale blue ruling.
-    If the evidence is ambiguous, fall back to grayscale segmentation.
+    This path is used only when the extracted components form a plausible
+    single line of handwriting. Other inputs retain the grayscale fallback.
     """
     if image.mode not in ("RGB", "RGBA", "P"):
         return None
@@ -43,63 +43,126 @@ def _segment_blue_ink(image, max_digits, expected_digits):
     rgb.thumbnail((1200, 800), Image.Resampling.LANCZOS)
     pixels = np.asarray(rgb, dtype=np.int16)
     height, width = pixels.shape[:2]
+    blue_minus_red = pixels[:, :, 2] - pixels[:, :, 0]
+    blue_minus_green = pixels[:, :, 2] - pixels[:, :, 1]
 
-    red = pixels[:, :, 0]
-    green = pixels[:, :, 1]
-    blue = pixels[:, :, 2]
+    attempts = []
+    for red_threshold, green_threshold in ((22, 12), (15, 8), (10, 5)):
+        mask = (
+            np.uint8(
+                (blue_minus_red >= red_threshold)
+                & (blue_minus_green >= green_threshold)
+            )
+            * 255
+        )
 
-    # Reject pale paper ruling while retaining much darker blue pen strokes.
-    blue_excess = blue - red
-    mask = np.uint8((blue_excess >= 22) & (blue - green >= 12)) * 255
+        # Remove almost full-height notebook ruling without erasing short digit strokes.
+        vertical = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (1, max(30, int(0.68 * height))),
+            ),
+        )
+        mask = cv2.subtract(mask, vertical)
 
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    min_area = max(28, round(width * height * 0.00008))
-    candidates = []
-    for index in range(1, count):
-        x, y, bw, bh, area = (int(value) for value in stats[index])
-        if area < min_area or bh < max(10, height * 0.025):
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        min_area = max(25, round(width * height * 0.00012))
+        candidates = []
+        for index in range(1, count):
+            x, y, bw, bh, area = map(int, stats[index])
+            if area < min_area or bh < max(10, 0.043 * height) or bw < 5:
+                continue
+            if bh > height * 0.50 or bw > width * 0.38:
+                continue
+            if x <= 1 or y <= 1 or x + bw >= width - 1 or y + bh >= height - 1:
+                continue
+            if bw > 5 * bh:
+                continue
+            candidates.append((x, y, bw, bh, area))
+        if len(candidates) < 2:
             continue
-        if bw < 4 or bw > width * 0.32 or bh > height * 0.46:
+
+        candidates.sort(key=lambda part: part[4], reverse=True)
+        seed = candidates[0]
+        seed_center = seed[1] + seed[3] / 2
+        aligned = [
+            part
+            for part in candidates
+            if abs(part[1] + part[3] / 2 - seed_center)
+            <= max(18, height * 0.13, seed[3] * 0.75)
+            and part[4] >= 0.09 * seed[4]
+            and part[3] >= 0.18 * seed[3]
+        ]
+        if len(aligned) < 2:
             continue
-        candidates.append((x, y, bw, bh, area))
 
-    if not candidates:
+        # Prefer complete connected strokes. Tiny detached strokes belong to an
+        # existing digit if their horizontal footprints overlap substantially.
+        aligned.sort(key=lambda part: part[0])
+        merged = []
+        for part in aligned:
+            x, y, bw, bh, area = part
+            target = None
+            for k, (mx, my, mw, mh, ma) in enumerate(merged):
+                overlap = max(0, min(x + bw, mx + mw) - max(x, mx))
+                gap_y = max(0, max(y, my) - min(y + bh, my + mh))
+                if overlap >= 0.48 * min(bw, mw) and gap_y <= 0.08 * height:
+                    target = k
+                    break
+            if target is None:
+                merged.append(part)
+            else:
+                mx, my, mw, mh, ma = merged[target]
+                nx, ny = min(x, mx), min(y, my)
+                nr, nb = max(x + bw, mx + mw), max(y + bh, my + mh)
+                merged[target] = (nx, ny, nr - nx, nb - ny, area + ma)
+        merged.sort(key=lambda part: part[0])
+        if not 2 <= len(merged) <= max_digits:
+            continue
+        if expected_digits is not None and len(merged) != expected_digits:
+            continue
+
+        # Reject candidate groups that are wildly different in height, or which
+        # overlap heavily enough that one digit may have been detected twice.
+        heights = [part[3] for part in merged]
+        typical_height = float(np.median(heights))
+        if min(heights) < max(11, 0.55 * typical_height):
+            continue
+        if max(heights) > 2.6 * typical_height:
+            continue
+        if any(
+            second[0] < first[0] + first[2] - 0.35 * min(first[2], second[2])
+            for first, second in zip(merged, merged[1:])
+        ):
+            continue
+        if any(
+            second[0] - (first[0] + first[2]) > 1.7 * typical_height
+            for first, second in zip(merged, merged[1:])
+        ):
+            continue
+
+        attempts.append((len(merged), red_threshold, mask, merged))
+
+    if not attempts:
         return None
 
-    # Only take a coherent line of similarly sized handwriting components.
-    candidates.sort(key=lambda candidate: candidate[4], reverse=True)
-    seed = candidates[0]
-    seed_center = seed[1] + seed[3] / 2
-    grouped = [
-        part
-        for part in candidates
-        if abs(part[1] + part[3] / 2 - seed_center) <= max(16, 0.65 * seed[3])
-        and part[3] >= 0.42 * seed[3]
-        and part[3] <= 2.2 * seed[3]
-        and part[4] >= 0.12 * seed[4]
-    ]
-    grouped.sort(key=lambda part: part[0])
-
-    if not 2 <= len(grouped) <= max_digits:
-        return None
-    if expected_digits is not None and len(grouped) != expected_digits:
-        return None
-
-    # A large gap usually means unrelated writing or spurious image regions.
-    heights = [part[3] for part in grouped]
-    typical_height = float(np.median(heights))
-    for first, second in zip(grouped[:-1], grouped[1:]):
-        if second[0] - (first[0] + first[2]) > typical_height * 1.5:
-            return None
+    # A second character detected consistently at a relaxed threshold is more
+    # useful than a strict mask that discarded much of a thin handwritten digit.
+    # Prefer the strictest threshold among candidates with the same region count.
+    attempts.sort(key=lambda attempt: (-attempt[0], -attempt[1]))
+    _, _, mask, regions = attempts[0]
 
     sx, sy = original_width / width, original_height / height
-    result = []
-    for x, y, bw, bh, _ in grouped:
-        area = mask[y : y + bh, x : x + bw]
+    segments = []
+    for x, y, bw, bh, _ in regions:
+        # Retain all ink within the region's bounding box in this chosen mask.
+        ink = mask[y : y + bh, x : x + bw]
         pad = max(5, round(0.23 * max(bw, bh)))
         crop = np.full((bh + 2 * pad, bw + 2 * pad), 255, dtype=np.uint8)
-        crop[pad : pad + bh, pad : pad + bw] = 255 - area
-        result.append(
+        crop[pad : pad + bh, pad : pad + bw] = 255 - ink
+        segments.append(
             DigitSegment(
                 Image.fromarray(crop),
                 (
@@ -110,7 +173,7 @@ def _segment_blue_ink(image, max_digits, expected_digits):
                 ),
             )
         )
-    return result
+    return segments
 
 
 def segment_digits(image, *, max_digits=5, expected_digits=None):

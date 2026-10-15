@@ -435,9 +435,18 @@ if st.button("Recognize Number", type="primary", key="multi_predict"):
                 multi_source, predict_fn=predict_digit, max_digits=5
             )
 
-            # Visualize the regions detected by segmentation
-            annotated = multi_source.copy().convert("RGB")
+            # Boxes are returned in the original (possibly rotation-corrected) image coordinates.
+            annotated = multi_source.convert("RGB").copy()
+            draw = ImageDraw.Draw(annotated)
+
+            for index, item in enumerate(details, start=1):
+                left, top, right, bottom = item["box"]
+                draw.rectangle((left, top, right, bottom), outline="#FF3030", width=6)
+                draw.text((left, max(0, top - 22)), str(index), fill="#FF3030")
+
+            # Optional display-only resize after drawing, not before.
             annotated.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+
 
             draw = ImageDraw.Draw(annotated)
 
