@@ -1,4 +1,3 @@
-
 import sys
 from pathlib import Path
 
@@ -33,10 +32,7 @@ st.set_page_config(
 
 st.title("Handwritten Digit Recognizer")
 
-st.write(
-    "Draw or upload a handwritten digit from 0 to 9 "
-    "and let the AI recognize it."
-)
+st.write("Draw or upload a handwritten digit from 0 to 9 and let the AI recognize it.")
 
 
 # ---------------------------------
@@ -120,10 +116,13 @@ def preprocess_drawing(image_data):
     )
 
     # Normalize pixels for the CNN
-    array = np.asarray(
-        processed,
-        dtype=np.float32,
-    ) / 255.0
+    array = (
+        np.asarray(
+            processed,
+            dtype=np.float32,
+        )
+        / 255.0
+    )
 
     model_input = array.reshape(1, 28, 28, 1)
 
@@ -165,17 +164,11 @@ if st.button(
 ):
     try:
         if canvas.image_data is None:
-            raise ValueError(
-                "Please draw a digit on the canvas."
-            )
+            raise ValueError("Please draw a digit on the canvas.")
 
-        processed, model_input = preprocess_drawing(
-            canvas.image_data
-        )
+        processed, model_input = preprocess_drawing(canvas.image_data)
 
-        predicted_digit, scores = predict_digit(
-            model_input
-        )
+        predicted_digit, scores = predict_digit(model_input)
 
         # Save the result so it remains visible
         st.session_state.drawing_result = {
@@ -190,10 +183,7 @@ if st.button(
 
     except Exception as error:
         st.session_state.drawing_result = None
-        st.error(
-            "Could not process the drawing. "
-            "Please try again."
-        )
+        st.error("Could not process the drawing. Please try again.")
         st.exception(error)
 
 
@@ -201,13 +191,9 @@ if st.button(
 # 7. Display saved drawing result
 # ---------------------------------
 if st.session_state.drawing_result is not None:
-
     result = st.session_state.drawing_result
 
-    st.success(
-        f"The AI predicts your drawing is: "
-        f"**{result['digit']}**"
-    )
+    st.success(f"The AI predicts your drawing is: **{result['digit']}**")
 
     st.image(
         result["image"],
@@ -215,10 +201,7 @@ if st.session_state.drawing_result is not None:
         width=150,
     )
 
-    st.write(
-        f"Highest model score: "
-        f"**{result['score']:.2%}**"
-    )
+    st.write(f"Highest model score: **{result['score']:.2%}**")
 
     st.caption(
         "This score is the model's softmax output, "
@@ -258,11 +241,10 @@ uploaded_file = st.file_uploader(
 # ---------------------------------
 if uploaded_file is not None:
     try:
-
         # Correct camera orientation metadata
-        original_image = ImageOps.exif_transpose(
-            Image.open(uploaded_file)
-        ).convert("RGB")
+        original_image = ImageOps.exif_transpose(Image.open(uploaded_file)).convert(
+            "RGB"
+        )
 
         # Allow the user to rotate their photo
         rotation = st.selectbox(
@@ -289,9 +271,7 @@ if uploaded_file is not None:
 
         # Existing preprocessing handles
         # background inversion and digit extraction
-        processed_image, model_input = preprocess_image(
-            original_image
-        )
+        processed_image, model_input = preprocess_image(original_image)
 
         col1, col2 = st.columns(2)
 
@@ -310,9 +290,7 @@ if uploaded_file is not None:
             )
 
         # Predict using the existing CNN
-        predicted_digit, scores = predict_digit(
-            model_input
-        )
+        predicted_digit, scores = predict_digit(model_input)
 
         highest_score = float(scores[predicted_digit])
 
@@ -324,9 +302,7 @@ if uploaded_file is not None:
             value=str(predicted_digit),
         )
 
-        st.write(
-            f"Highest model score: **{highest_score:.2%}**"
-        )
+        st.write(f"Highest model score: **{highest_score:.2%}**")
 
         st.caption(
             "This score is the model's softmax output, "
@@ -348,10 +324,7 @@ if uploaded_file is not None:
         st.error(f"Could not process this image: {error}")
 
     except Exception as error:
-        st.error(
-            "Prediction failed. Check the model "
-            "and application configuration."
-        )
+        st.error("Prediction failed. Check the model and application configuration.")
         st.exception(error)
 
 else:
@@ -501,13 +474,13 @@ if result is not None and result["mode"] == multi_mode:
         use_container_width=True,
     )
 
-    st.write(
-        f"Number of detected regions: {len(result['digits'])}"
-    )
+    st.write(f"Number of detected regions: {len(result['digits'])}")
 
     st.image(
         [item["processed"] for item in result["digits"]],
-        caption=[f"Digit {i+1}: {item['digit']}" for i, item in enumerate(result["digits"])],
+        caption=[
+            f"Digit {i + 1}: {item['digit']}" for i, item in enumerate(result["digits"])
+        ],
         width=90,
     )
     st.caption(
