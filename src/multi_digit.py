@@ -1,6 +1,6 @@
 """Classify each segmented digit using the project's existing CNN."""
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 from PIL import Image
@@ -14,13 +14,16 @@ def recognize_number(
     *,
     predict_fn: Callable,
     max_digits: int = 5,
+    expected_digits: int | None = None,
 ) -> tuple[str, list[dict]]:
     """Return the full number as *text* and diagnostic data for each digit.
 
     Retaining text preserves leading zeros such as '007'. The `predict_fn`
     argument should be the existing `src.inference.predict_digit` function.
     """
-    segments = segment_digits(image, max_digits=max_digits)
+    segments = segment_digits(
+        image, max_digits=max_digits, expected_digits=expected_digits
+    )
     predictions = []
 
     for segment in segments:

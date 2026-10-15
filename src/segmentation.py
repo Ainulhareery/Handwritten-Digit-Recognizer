@@ -5,6 +5,7 @@ lets a user supply the number of characters (not their identities).
 """
 
 from dataclasses import dataclass
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -176,11 +177,132 @@ def _segment_blue_ink(image, max_digits, expected_digits):
     return segments
 
 
+def _segment_clean_canvas(image, max_digits, expected_digits):
+    """Find individual black strokes on a uniformly white drawing canvas.
+
+    The canvas has neither page ruling nor camera shadows, so the photographed-
+    paper heuristic should not be used here. Returns None for ordinary photos.
+    """
+    if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        image = Image.alpha_composite(white, rgba).convert("RGB")
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    height, width = rgb.shape[:2]
+    if height < 24 or width < 24:
+        return None
+
+    # Do not treat photographed paper as the drawing canvas.
+    white_share = np.mean(np.min(rgb, axis=2) >= 245)
+    if white_share < 0.76:
+        return None
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    ink = np.uint8(gray < 175) * 255
+    ink_fraction = np.mean(ink > 0)
+    if not 0.002 <= ink_fraction <= 0.40:
+        return None
+
+    # Screenshots can include a thin black border at their bottom edge.
+    # Do not remove a real digit stroke unless the row spans almost the canvas.
+    for y in range(height):
+        if np.mean(ink[y] > 0) > 0.85:
+            ink[y] = 0
+
+    count, _, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    min_area = max(16, round(width * height * 0.0002))
+    components = []
+    for index in range(1, count):
+        x, y, w, h, area = map(int, stats[index])
+        if area < min_area or h < max(8, round(height * 0.12)):
+            continue
+        if w > 0.72 * width and h < height * 0.25:
+            continue
+        components.append((x, y, w, h))
+
+    if not components:
+        raise ValueError("No handwritten strokes found on the drawing canvas.")
+
+    # A digit may consist of detached strokes. Merge components with matching
+    # horizontal footprints, but not adjacent digits separated by a gap.
+    components.sort(key=lambda item: item[0])
+    merged = []
+    for x, y, w, h in components:
+        if merged:
+            mx, my, mw, mh = merged[-1]
+            overlap = min(x + w, mx + mw) - max(x, mx)
+            if overlap >= max(3, 0.1 * min(w, mw)):
+                left, top = min(x, mx), min(y, my)
+                right, bottom = max(x + w, mx + mw), max(y + h, my + mh)
+                merged[-1] = (left, top, right - left, bottom - top)
+                continue
+        merged.append((x, y, w, h))
+
+    if expected_digits is not None and len(merged) < expected_digits:
+        merged = _split_widest_ink_region(ink, merged, expected_digits)
+
+    if not 2 <= len(merged) <= max_digits:
+        raise ValueError(
+            f"Found {len(merged)} plausible digit(s) on the canvas. "
+            "Separate overlapping strokes or try the expected-digit count."
+        )
+    if expected_digits is not None and len(merged) != expected_digits:
+        raise ValueError(
+            f"Detected {len(merged)} digits, but you selected {expected_digits}. "
+            "Please check the drawing or try again."
+        )
+
+    results = []
+    for x, y, w, h in merged:
+        patch = ink[y : y + h, x : x + w]
+        pad = max(5, round(0.20 * max(w, h)))
+        crop = np.full((h + 2 * pad, w + 2 * pad), 255, np.uint8)
+        crop[pad : pad + h, pad : pad + w] = 255 - patch
+        results.append(DigitSegment(Image.fromarray(crop), (x, y, x + w, y + h)))
+    return results
+
+
+def _split_widest_ink_region(mask, regions, required_count):
+    """Attempt low-ink vertical cuts when the requested digit count is known.
+
+    This is a heuristic, not reliable OCR for tightly joined or cursive text.
+    Rejects splits where no plausible valley exists.
+    """
+    regions = list(regions)
+    while len(regions) < required_count:
+        if not regions:
+            return regions
+        median_width = float(np.median([box[2] for box in regions]))
+        index = max(range(len(regions)), key=lambda i: regions[i][2])
+        x, y, width, height = regions[index]
+        if width < max(18, 1.32 * median_width):
+            break
+        profile = np.sum(mask[y : y + height, x : x + width] > 0, axis=0).astype(
+            np.float32
+        )
+        profile = cv2.GaussianBlur(profile.reshape(1, -1), (0, 0), sigmaX=2)[0]
+        lo, hi = round(width * 0.30), round(width * 0.70)
+        if hi <= lo + 2:
+            break
+        candidate = lo + int(np.argmin(profile[lo:hi]))
+        # A cut through a dense pen stroke is too uncertain to force.
+        if profile[candidate] > max(3.0, 0.72 * float(np.percentile(profile, 75))):
+            break
+        regions[index : index + 1] = [
+            (x, y, candidate, height),
+            (x + candidate, y, width - candidate, height),
+        ]
+    return regions
+
+
 def segment_digits(image, *, max_digits=5, expected_digits=None):
     if not 2 <= max_digits <= 20:
         raise ValueError("max_digits must be between 2 and 20.")
     if expected_digits is not None and not 2 <= expected_digits <= max_digits:
         raise ValueError("expected_digits must be between 2 and max_digits.")
+    canvas_segments = _segment_clean_canvas(image, max_digits, expected_digits)
+    if canvas_segments is not None:
+        return canvas_segments
     color_segments = _segment_blue_ink(image, max_digits, expected_digits)
     if color_segments is not None:
         return color_segments

@@ -1,12 +1,15 @@
+# Project imports must follow PROJECT_ROOT setup.
+# ruff: noqa: E402
+
+import logging
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageOps, ImageDraw
+from PIL import Image, ImageOps
 from streamlit_drawable_canvas import st_canvas
-
 
 # ---------------------------------
 # 1. Set up project imports
@@ -16,10 +19,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.preprocessing import preprocess_image
+from src.image_quality import enhance_photo
 from src.inference import predict_digit
 from src.multi_digit import recognize_number
+from src.preprocessing import preprocess_image
+from src.visualization import annotate_regions
 
+# Application logger
+logger = logging.getLogger(__name__)
 
 # ---------------------------------
 # 2. Streamlit configuration
@@ -181,10 +188,10 @@ if st.button(
         st.session_state.drawing_result = None
         st.warning(str(error))
 
-    except Exception as error:
+    except Exception:
         st.session_state.drawing_result = None
+        logger.exception("Single-digit drawing recognition failed")
         st.error("Could not process the drawing. Please try again.")
-        st.exception(error)
 
 
 # ---------------------------------
@@ -323,9 +330,9 @@ if uploaded_file is not None:
     except (ValueError, OSError, TypeError) as error:
         st.error(f"Could not process this image: {error}")
 
-    except Exception as error:
-        st.error("Prediction failed. Check the model and application configuration.")
-        st.exception(error)
+    except Exception:  # noqa: BLE001
+        logger.exception("Single-digit image upload prediction failed")
+        st.error("We couldn't process this image. Please try another image.")
 
 else:
     st.info(
@@ -360,6 +367,27 @@ multi_mode = st.radio(
     horizontal=True,
     key="multi_mode",
 )
+
+with st.expander("Recognition options (optional)"):
+    digit_count_option = st.selectbox(
+        "How many digits are written?",
+        ["Automatic", "2", "3", "4", "5"],
+        key="multi_digit_count_option",
+        help="Choose a count only if automatic segmentation merges or misses digits.",
+    )
+    enhance_weak_photo = (
+        st.checkbox(
+            "Try improving a faint/blurry photo (experimental)",
+            value=False,
+            key="multi_photo_enhance",
+            help="This can help or make things worse. It cannot restore lost detail.",
+        )
+        if multi_mode == "Upload a number"
+        else False
+    )
+
+expected_count = None if digit_count_option == "Automatic" else int(digit_count_option)
+
 
 multi_source = None
 if multi_mode == "Draw a number":
@@ -425,53 +453,60 @@ else:
             use_container_width=True,
         )
 
+
+# ---------------------------------
+# Recognize multi-digit number
+# ---------------------------------
 if st.button("Recognize Number", type="primary", key="multi_predict"):
     st.session_state.multi_result = None
+
     if multi_source is None:
         st.warning("Draw a number or upload an image first.")
+
     else:
         try:
-            number, details = recognize_number(
-                multi_source, predict_fn=predict_digit, max_digits=5
+            # Apply enhancement only when requested for uploads
+            image_for_prediction = (
+                enhance_photo(multi_source)
+                if enhance_weak_photo and multi_mode == "Upload a number"
+                else multi_source
             )
 
-            # Boxes are returned in the original (possibly rotation-corrected) image coordinates.
-            annotated = multi_source.convert("RGB").copy()
-            draw = ImageDraw.Draw(annotated)
+            # Recognize individual digits and combine results
+            number, details = recognize_number(
+                image_for_prediction,
+                predict_fn=predict_digit,
+                max_digits=5,
+                expected_digits=expected_count,
+            )
 
-            for index, item in enumerate(details, start=1):
-                left, top, right, bottom = item["box"]
-                draw.rectangle((left, top, right, bottom), outline="#FF3030", width=6)
-                draw.text((left, max(0, top - 22)), str(index), fill="#FF3030")
+            # Draw bounding boxes only once
+            annotated = annotate_regions(multi_source, details)
 
-            # Optional display-only resize after drawing, not before.
-            annotated.thumbnail((1200, 800), Image.Resampling.LANCZOS)
-
-
-            draw = ImageDraw.Draw(annotated)
-
-            for i, item in enumerate(details, start=1):
-                box = item["box"]
-                draw.rectangle(box, outline="red", width=3)
-                draw.text(
-                    (box[0], max(0, box[1] - 15)),
-                    str(i),
-                    fill="red",
-                )
-
+            # Save results for display
             st.session_state.multi_result = {
                 "number": number,
                 "digits": details,
                 "mode": multi_mode,
                 "annotated": annotated,
             }
+
         except ValueError as error:
             st.warning(str(error))
-        except Exception as error:
-            st.error("Could not recognize this number.")
-            st.exception(error)
 
+        except Exception:
+            logger.exception("Multi-digit recognition failed")
+            st.error(
+                "Could not recognize this number. "
+                "Please try again with a clearer image."
+            )
+
+
+# ---------------------------------
+# Display recognition result
+# ---------------------------------
 result = st.session_state.multi_result
+
 if result is not None and result["mode"] == multi_mode:
     st.success(f"Recognized number: **{result['number']}**")
 
