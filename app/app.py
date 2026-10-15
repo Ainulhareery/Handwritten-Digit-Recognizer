@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
 
@@ -406,29 +406,50 @@ if multi_mode == "Draw a number":
         multi_source = Image.fromarray(
             np.asarray(drawn_number.image_data, dtype=np.uint8)
         )
+
+
 else:
     number_upload = st.file_uploader(
         "Upload a photo showing 2–5 separated handwritten digits",
         type=["png", "jpg", "jpeg"],
         key=f"multi_upload_{st.session_state.multi_canvas_version}",
     )
+
     if number_upload is not None:
-        multi_source = ImageOps.exif_transpose(
+        original_number_image = ImageOps.exif_transpose(
             Image.open(number_upload)
         ).convert("RGB")
-        multi_rotation = st.selectbox(
-            "Rotate the number to make it upright",
-            ["No rotation", "90° clockwise", "90° counterclockwise", "180°"],
-            key="multi_rotation",
-        )
+
+        # Rotation is optional, not required
+        with st.expander("Adjust image orientation (optional)"):
+            multi_rotation = st.selectbox(
+                "Rotate only if the image is sideways",
+                [
+                    "No rotation",
+                    "90° clockwise",
+                    "90° counterclockwise",
+                    "180°",
+                ],
+                key="multi_rotation",
+            )
+
         angles = {
             "No rotation": 0,
             "90° clockwise": -90,
             "90° counterclockwise": 90,
             "180°": 180,
         }
-        multi_source = multi_source.rotate(
-            angles[multi_rotation], expand=True
+
+        multi_source = original_number_image.rotate(
+            angles[multi_rotation],
+            expand=True,
+        )
+
+        st.subheader("Uploaded Image")
+        st.image(
+            multi_source,
+            caption="Image submitted for recognition",
+            use_container_width=True,
         )
 
 if st.button("Recognize Number", type="primary", key="multi_predict"):
@@ -440,10 +461,27 @@ if st.button("Recognize Number", type="primary", key="multi_predict"):
             number, details = recognize_number(
                 multi_source, predict_fn=predict_digit, max_digits=5
             )
+
+            # Visualize the regions detected by segmentation
+            annotated = multi_source.copy().convert("RGB")
+            annotated.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+
+            draw = ImageDraw.Draw(annotated)
+
+            for i, item in enumerate(details, start=1):
+                box = item["box"]
+                draw.rectangle(box, outline="red", width=3)
+                draw.text(
+                    (box[0], max(0, box[1] - 15)),
+                    str(i),
+                    fill="red",
+                )
+
             st.session_state.multi_result = {
                 "number": number,
                 "digits": details,
                 "mode": multi_mode,
+                "annotated": annotated,
             }
         except ValueError as error:
             st.warning(str(error))
@@ -454,6 +492,19 @@ if st.button("Recognize Number", type="primary", key="multi_predict"):
 result = st.session_state.multi_result
 if result is not None and result["mode"] == multi_mode:
     st.success(f"Recognized number: **{result['number']}**")
+
+    st.subheader("Detected Digit Regions")
+
+    st.image(
+        result["annotated"],
+        caption="Red boxes show the regions extracted for recognition",
+        use_container_width=True,
+    )
+
+    st.write(
+        f"Number of detected regions: {len(result['digits'])}"
+    )
+
     st.image(
         [item["processed"] for item in result["digits"]],
         caption=[f"Digit {i+1}: {item['digit']}" for i, item in enumerate(result["digits"])],
