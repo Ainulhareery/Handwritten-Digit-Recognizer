@@ -31,13 +31,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------
 # 2. Streamlit configuration
 # ---------------------------------
+
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+st.html(ASSETS_DIR / "styles.css")
+st.html(ASSETS_DIR / "header.html")
+
+
 st.set_page_config(
     page_title="Handwritten Digit Recognizer",
     page_icon="🔢",
     layout="centered",
 )
-
-st.title("Handwritten Digit Recognizer")
 
 st.write("Draw or upload a handwritten digit from 0 to 9 and let the AI recognize it.")
 
@@ -551,3 +555,5 @@ st.caption(
     "Model benchmark: 99.57% accuracy on the MNIST "
     "test set. Real-world image performance may differ."
 )
+
+st.html(ASSETS_DIR / "footer.html")
