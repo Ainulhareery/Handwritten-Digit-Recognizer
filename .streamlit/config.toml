@@ -1,0 +1,19 @@
+# Dual-theme configuration: switch via Streamlit's ⋮ > Settings > Theme.
+# Keep the common font at top level; each theme defines its own contrast palette.
+[theme]
+base = "light"
+font = "sans serif"
+
+[theme.light]
+primaryColor = "#185B64"
+backgroundColor = "#F6F7F3"
+secondaryBackgroundColor = "#ECF1EE"
+textColor = "#202D31"
+borderColor = "#CAD4D1"
+
+[theme.dark]
+primaryColor = "#85CDD2"
+backgroundColor = "#141B1D"
+secondaryBackgroundColor = "#1F2A2D"
+textColor = "#EAF1EF"
+borderColor = "#43585B"
