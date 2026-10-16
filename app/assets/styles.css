@@ -1,0 +1,136 @@
+/*
+  Recognition Laboratory — adaptive theme (v2)
+  Only presentation components with lab- classes are styled here.
+  Colors are inherited from Streamlit's active Light/Dark theme.
+  No private Streamlit DOM selectors and no JavaScript.
+*/
+:root {
+  --lab-spacing: clamp(1.25rem, 3vw, 2.5rem);
+}
+
+.lab-header,
+.lab-footer {
+  box-sizing: border-box;
+  color: inherit;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    border-color 180ms ease;
+}
+
+.lab-header {
+  background: transparent; /* Fallback for older browsers */
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-left: 4px solid var(--primary-color, currentColor);
+  padding: var(--lab-spacing);
+  margin: 0 0 1.6rem;
+}
+
+.lab-header__eyebrow {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  letter-spacing: 0.065em;
+  line-height: 1.65;
+  text-transform: uppercase;
+  opacity: 0.83;
+}
+
+.lab-header__title {
+  margin: 0 0 1.15rem;
+  color: inherit;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.875rem, 4vw, 2.85rem);
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+}
+
+.lab-header__statement {
+  margin: 0 0 0.45rem;
+  color: inherit;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.125rem, 2vw, 1.35rem);
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.lab-header__description {
+  margin: 0;
+  max-width: 67ch;
+  color: inherit;
+  opacity: 0.88;
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.lab-header__rule {
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  margin: 1.5rem 0 1rem;
+}
+
+.lab-header__metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.8rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: inherit;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.lab-header__metadata li {
+  opacity: 0.92;
+}
+.lab-header__metadata strong {
+  color: inherit;
+  font-weight: 700;
+}
+
+.lab-footer {
+  margin-top: 2.5rem;
+  padding: 1.1rem 0 0;
+  border-top: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  opacity: 0.86;
+}
+.lab-footer p {
+  margin: 0 0 0.5rem;
+}
+.lab-footer a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+.lab-footer a:hover {
+  opacity: 0.75;
+}
+.lab-footer a:focus-visible {
+  outline: 3px solid currentColor;
+  outline-offset: 3px;
+}
+
+@media (max-width: 640px) {
+  .lab-header {
+    padding: 1.25rem;
+  }
+  .lab-header__eyebrow {
+    letter-spacing: 0.035em;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lab-header,
+  .lab-footer,
+  .lab-header *,
+  .lab-footer * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
