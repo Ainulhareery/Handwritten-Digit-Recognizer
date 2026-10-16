@@ -1,0 +1,492 @@
+"""Segment 2–5 clearly separated or lightly touching handwritten digits.
+
+Experimental segmentation, not general document OCR. An optional `expected_digits`
+lets a user supply the number of characters (not their identities).
+"""
+
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+from PIL import Image
+
+
+@dataclass(frozen=True)
+class DigitSegment:
+    image: Image.Image
+    box: tuple[int, int, int, int]
+
+
+def _prepare(image):
+    if not isinstance(image, Image.Image):
+        raise TypeError("Expected a PIL image.")
+    if image.mode in ("RGBA", "LA") or ("transparency" in image.info):
+        rgba = image.convert("RGBA")
+        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        image = Image.alpha_composite(white, rgba).convert("RGB")
+    gray = image.convert("L")
+    ow, oh = gray.size
+    gray.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+    return np.asarray(gray, dtype=np.uint8), (ow, oh)
+
+
+def _segment_blue_ink(image, max_digits, expected_digits):
+    """Find blue/purple ink components at several contrast levels.
+
+    This path is used only when the extracted components form a plausible
+    single line of handwriting. Other inputs retain the grayscale fallback.
+    """
+    if image.mode not in ("RGB", "RGBA", "P"):
+        return None
+
+    rgb = image.convert("RGB")
+    original_width, original_height = rgb.size
+    rgb.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+    pixels = np.asarray(rgb, dtype=np.int16)
+    height, width = pixels.shape[:2]
+    blue_minus_red = pixels[:, :, 2] - pixels[:, :, 0]
+    blue_minus_green = pixels[:, :, 2] - pixels[:, :, 1]
+
+    attempts = []
+    for red_threshold, green_threshold in ((22, 12), (15, 8), (10, 5)):
+        mask = (
+            np.uint8(
+                (blue_minus_red >= red_threshold)
+                & (blue_minus_green >= green_threshold)
+            )
+            * 255
+        )
+
+        # Remove almost full-height notebook ruling without erasing short digit strokes.
+        vertical = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (1, max(30, int(0.68 * height))),
+            ),
+        )
+        mask = cv2.subtract(mask, vertical)
+
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        min_area = max(25, round(width * height * 0.00012))
+        candidates = []
+        for index in range(1, count):
+            x, y, bw, bh, area = map(int, stats[index])
+            if area < min_area or bh < max(10, 0.043 * height) or bw < 5:
+                continue
+            if bh > height * 0.50 or bw > width * 0.38:
+                continue
+            if x <= 1 or y <= 1 or x + bw >= width - 1 or y + bh >= height - 1:
+                continue
+            if bw > 5 * bh:
+                continue
+            candidates.append((x, y, bw, bh, area))
+        if len(candidates) < 2:
+            continue
+
+        candidates.sort(key=lambda part: part[4], reverse=True)
+        seed = candidates[0]
+        seed_center = seed[1] + seed[3] / 2
+        aligned = [
+            part
+            for part in candidates
+            if abs(part[1] + part[3] / 2 - seed_center)
+            <= max(18, height * 0.13, seed[3] * 0.75)
+            and part[4] >= 0.09 * seed[4]
+            and part[3] >= 0.18 * seed[3]
+        ]
+        if len(aligned) < 2:
+            continue
+
+        # Prefer complete connected strokes. Tiny detached strokes belong to an
+        # existing digit if their horizontal footprints overlap substantially.
+        aligned.sort(key=lambda part: part[0])
+        merged = []
+        for part in aligned:
+            x, y, bw, bh, area = part
+            target = None
+            for k, (mx, my, mw, mh, ma) in enumerate(merged):
+                overlap = max(0, min(x + bw, mx + mw) - max(x, mx))
+                gap_y = max(0, max(y, my) - min(y + bh, my + mh))
+                if overlap >= 0.48 * min(bw, mw) and gap_y <= 0.08 * height:
+                    target = k
+                    break
+            if target is None:
+                merged.append(part)
+            else:
+                mx, my, mw, mh, ma = merged[target]
+                nx, ny = min(x, mx), min(y, my)
+                nr, nb = max(x + bw, mx + mw), max(y + bh, my + mh)
+                merged[target] = (nx, ny, nr - nx, nb - ny, area + ma)
+        merged.sort(key=lambda part: part[0])
+        if not 2 <= len(merged) <= max_digits:
+            continue
+        if expected_digits is not None and len(merged) != expected_digits:
+            continue
+
+        # Reject candidate groups that are wildly different in height, or which
+        # overlap heavily enough that one digit may have been detected twice.
+        heights = [part[3] for part in merged]
+        typical_height = float(np.median(heights))
+        if min(heights) < max(11, 0.55 * typical_height):
+            continue
+        if max(heights) > 2.6 * typical_height:
+            continue
+        if any(
+            second[0] < first[0] + first[2] - 0.35 * min(first[2], second[2])
+            for first, second in zip(merged, merged[1:])
+        ):
+            continue
+        if any(
+            second[0] - (first[0] + first[2]) > 1.7 * typical_height
+            for first, second in zip(merged, merged[1:])
+        ):
+            continue
+
+        attempts.append((len(merged), red_threshold, mask, merged))
+
+    if not attempts:
+        return None
+
+    # A second character detected consistently at a relaxed threshold is more
+    # useful than a strict mask that discarded much of a thin handwritten digit.
+    # Prefer the strictest threshold among candidates with the same region count.
+    attempts.sort(key=lambda attempt: (-attempt[0], -attempt[1]))
+    _, _, mask, regions = attempts[0]
+
+    sx, sy = original_width / width, original_height / height
+    segments = []
+    for x, y, bw, bh, _ in regions:
+        # Retain all ink within the region's bounding box in this chosen mask.
+        ink = mask[y : y + bh, x : x + bw]
+        pad = max(5, round(0.23 * max(bw, bh)))
+        crop = np.full((bh + 2 * pad, bw + 2 * pad), 255, dtype=np.uint8)
+        crop[pad : pad + bh, pad : pad + bw] = 255 - ink
+        segments.append(
+            DigitSegment(
+                Image.fromarray(crop),
+                (
+                    round(x * sx),
+                    round(y * sy),
+                    round((x + bw) * sx),
+                    round((y + bh) * sy),
+                ),
+            )
+        )
+    return segments
+
+
+def _segment_clean_canvas(image, max_digits, expected_digits):
+    """Find individual black strokes on a uniformly white drawing canvas.
+
+    The canvas has neither page ruling nor camera shadows, so the photographed-
+    paper heuristic should not be used here. Returns None for ordinary photos.
+    """
+    if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        image = Image.alpha_composite(white, rgba).convert("RGB")
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    height, width = rgb.shape[:2]
+    if height < 24 or width < 24:
+        return None
+
+    # Do not treat photographed paper as the drawing canvas.
+    white_share = np.mean(np.min(rgb, axis=2) >= 245)
+    if white_share < 0.76:
+        return None
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    ink = np.uint8(gray < 175) * 255
+    ink_fraction = np.mean(ink > 0)
+    if not 0.002 <= ink_fraction <= 0.40:
+        return None
+
+    # Screenshots can include a thin black border at their bottom edge.
+    # Do not remove a real digit stroke unless the row spans almost the canvas.
+    for y in range(height):
+        if np.mean(ink[y] > 0) > 0.85:
+            ink[y] = 0
+
+    count, _, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    min_area = max(16, round(width * height * 0.0002))
+    components = []
+    for index in range(1, count):
+        x, y, w, h, area = map(int, stats[index])
+        if area < min_area or h < max(8, round(height * 0.12)):
+            continue
+        if w > 0.72 * width and h < height * 0.25:
+            continue
+        components.append((x, y, w, h))
+
+    if not components:
+        raise ValueError("No handwritten strokes found on the drawing canvas.")
+
+    # A digit may consist of detached strokes. Merge components with matching
+    # horizontal footprints, but not adjacent digits separated by a gap.
+    components.sort(key=lambda item: item[0])
+    merged = []
+    for x, y, w, h in components:
+        if merged:
+            mx, my, mw, mh = merged[-1]
+            overlap = min(x + w, mx + mw) - max(x, mx)
+            if overlap >= max(3, 0.1 * min(w, mw)):
+                left, top = min(x, mx), min(y, my)
+                right, bottom = max(x + w, mx + mw), max(y + h, my + mh)
+                merged[-1] = (left, top, right - left, bottom - top)
+                continue
+        merged.append((x, y, w, h))
+
+    if expected_digits is not None and len(merged) < expected_digits:
+        merged = _split_widest_ink_region(ink, merged, expected_digits)
+
+    if not 2 <= len(merged) <= max_digits:
+        raise ValueError(
+            f"Found {len(merged)} plausible digit(s) on the canvas. "
+            "Separate overlapping strokes or try the expected-digit count."
+        )
+    if expected_digits is not None and len(merged) != expected_digits:
+        raise ValueError(
+            f"Detected {len(merged)} digits, but you selected {expected_digits}. "
+            "Please check the drawing or try again."
+        )
+
+    results = []
+    for x, y, w, h in merged:
+        patch = ink[y : y + h, x : x + w]
+        pad = max(5, round(0.20 * max(w, h)))
+        crop = np.full((h + 2 * pad, w + 2 * pad), 255, np.uint8)
+        crop[pad : pad + h, pad : pad + w] = 255 - patch
+        results.append(DigitSegment(Image.fromarray(crop), (x, y, x + w, y + h)))
+    return results
+
+
+def _split_widest_ink_region(mask, regions, required_count):
+    """Attempt low-ink vertical cuts when the requested digit count is known.
+
+    This is a heuristic, not reliable OCR for tightly joined or cursive text.
+    Rejects splits where no plausible valley exists.
+    """
+    regions = list(regions)
+    while len(regions) < required_count:
+        if not regions:
+            return regions
+        median_width = float(np.median([box[2] for box in regions]))
+        index = max(range(len(regions)), key=lambda i: regions[i][2])
+        x, y, width, height = regions[index]
+        if width < max(18, 1.32 * median_width):
+            break
+        profile = np.sum(mask[y : y + height, x : x + width] > 0, axis=0).astype(
+            np.float32
+        )
+        profile = cv2.GaussianBlur(profile.reshape(1, -1), (0, 0), sigmaX=2)[0]
+        lo, hi = round(width * 0.30), round(width * 0.70)
+        if hi <= lo + 2:
+            break
+        candidate = lo + int(np.argmin(profile[lo:hi]))
+        # A cut through a dense pen stroke is too uncertain to force.
+        if profile[candidate] > max(3.0, 0.72 * float(np.percentile(profile, 75))):
+            break
+        regions[index : index + 1] = [
+            (x, y, candidate, height),
+            (x + candidate, y, width - candidate, height),
+        ]
+    return regions
+
+
+def segment_digits(image, *, max_digits=5, expected_digits=None):
+    if not 2 <= max_digits <= 20:
+        raise ValueError("max_digits must be between 2 and 20.")
+    if expected_digits is not None and not 2 <= expected_digits <= max_digits:
+        raise ValueError("expected_digits must be between 2 and max_digits.")
+    canvas_segments = _segment_clean_canvas(image, max_digits, expected_digits)
+    if canvas_segments is not None:
+        return canvas_segments
+    color_segments = _segment_blue_ink(image, max_digits, expected_digits)
+    if color_segments is not None:
+        return color_segments
+    gray, (ow, oh) = _prepare(image)
+    h, w = gray.shape
+    if h < 24 or w < 24:
+        raise ValueError("Image is too small for recognition.")
+    # Local background removal works better than global Otsu on uneven paper.
+    background = cv2.GaussianBlur(gray, (0, 0), sigmaX=max(7, min(h, w) / 35))
+    if np.median(gray) >= 128:
+        contrast = cv2.subtract(background, gray)
+        background_fill = 255
+    else:
+        contrast = cv2.subtract(gray, background)
+        background_fill = 0
+    # Strong handwritten strokes are dark relative to nearby paper.
+    # Reject weak rule lines and most paper texture.
+    positive = contrast[contrast > 5]
+    if positive.size < 20:
+        raise ValueError("No clear handwriting detected.")
+    threshold = max(15, min(38, float(np.percentile(positive, 72)) * 0.55))
+    mask = np.uint8(contrast > threshold) * 255
+    # Remove thin rules spanning much of the image, not individual digit bars.
+    long_width = max(35, round(w * 0.38))
+    horizontal = cv2.morphologyEx(
+        mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (long_width, 1))
+    )
+    mask = cv2.subtract(mask, horizontal)
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    min_area = max(18, int(w * h * 0.00024))
+    candidates = []
+    for i in range(1, n):
+        x, y, bw, bh, area = map(int, stats[i])
+        if area < min_area or bh < max(9, h * 0.045) or bw < max(3, w * 0.008):
+            continue
+        if bw > 0.78 * w or bh > 0.75 * h:
+            continue
+        if bw > bh * 6:
+            continue
+        if (x == 0 or y == 0 or x + bw >= w or y + bh >= h) and area < 3 * min_area:
+            continue
+        candidates.append((i, x, y, bw, bh, area))
+    if not candidates:
+        raise ValueError("No usable handwriting regions detected.")
+    # Select dominant writing rather than paper wrinkles and tiny marks.
+    # Group components by the writing line's vertical center.
+    interior = [
+        c
+        for c in candidates
+        if c[1] > 0.015 * w
+        and c[1] + c[3] < 0.985 * w
+        and c[2] > 0.015 * h
+        and c[2] + c[4] < 0.985 * h
+    ]
+    eligible = interior or candidates
+    peak_area = max(c[5] for c in eligible)
+    dominant = [c for c in eligible if c[5] >= 0.23 * peak_area]
+    best_group = []
+    best_mass = -1
+    for seed in dominant:
+        _, _, sy, _, sh, _ = seed
+        cy = sy + sh * 0.5
+        group = [
+            c for c in dominant if abs(c[2] + c[4] * 0.5 - cy) <= max(24, 0.12 * h)
+        ]
+        mass = sum(c[5] for c in group)
+        if mass > best_mass:
+            best_group, best_mass = group, mass
+    # Allow nearby detached pen strokes with same text line.
+    left = max(0, min(c[1] for c in best_group) - round(w * 0.006))
+    right = min(w, max(c[1] + c[3] for c in best_group) + round(w * 0.006))
+    top = max(0, min(c[2] for c in best_group) - round(h * 0.012))
+    bottom = min(h, max(c[2] + c[4] for c in best_group) + round(h * 0.012))
+    if right - left < 20 or bottom - top < 15:
+        raise ValueError("Unable to isolate a handwritten number.")
+    # Keep components whose centers align with dominant writing area, but do not
+    # demand that the whole number is connected (important for disconnected strokes).
+    roi = mask[top:bottom, left:right]
+    raw = np.sum(roi > 0, axis=0).astype(np.float32)
+    if np.count_nonzero(raw) < 12:
+        raise ValueError("Insufficient digit strokes to segment.")
+    first, last = np.flatnonzero(raw > 0)[[0, -1]]
+    raw = raw[first : last + 1]
+    left += int(first)
+    right = left + len(raw)
+    width = len(raw)
+    if width < 20:
+        raise ValueError("The detected number is too narrow.")
+    sigma = max(1.2, width / 120)
+    smooth = cv2.GaussianBlur(raw.reshape(1, -1), (0, 0), sigmaX=sigma)[0]
+    # Choose vertical cuts at low-ink valleys; cuts may cross a small overlap.
+    minimum_spacing = max(7, round(width / (max_digits * 1.65)))
+    local_min = []
+    for j in range(minimum_spacing, width - minimum_spacing):
+        if smooth[j] <= smooth[j - 1] and smooth[j] <= smooth[j + 1]:
+            local_min.append(j)
+    # Remove near-duplicate minima (flat valleys) via greedy scoring.
+    density = float(np.percentile(smooth, 65))
+    if expected_digits is None:
+        # One split per low-ink *interval*, not one per pixel-wise minimum.
+        # This avoids splitting a wide blank gap into several fake digits.
+        low = smooth < max(2.0, density * 0.50)
+        indexes = np.flatnonzero(low)
+        groups = (
+            np.split(indexes, np.where(np.diff(indexes) > 1)[0] + 1)
+            if indexes.size
+            else []
+        )
+        cuts = []
+        for group in groups:
+            if group.size == 0:
+                continue
+            center = int(group[len(group) // 2])
+            if minimum_spacing <= center <= width - minimum_spacing:
+                cuts.append(center)
+        # Too many plausible boundaries means we cannot identify digits safely.
+        if not 1 <= len(cuts) <= max_digits - 1:
+            raise ValueError(
+                f"Found {len(cuts) + 1} candidate digit regions; expected 2–{max_digits}. "
+                "Try a tighter crop or select the expected digit count."
+            )
+    else:
+        # With number of digits known, search all candidate cut combinations with
+        # a mild width regularizer to prevent tiny fragments.
+        from itertools import combinations
+
+        count = expected_digits
+        pool = sorted(local_min, key=lambda j: float(smooth[j]))[:35]
+        if len(pool) < count - 1:
+            raise ValueError("Not enough potential digit boundaries.")
+        desired = width / count
+        best = None
+        cuts = None
+        for proposed in combinations(sorted(pool), count - 1):
+            spans = np.diff([0, *proposed, width])
+            if np.min(spans) < max(6, width / (count * 2.5)):
+                continue
+            score = sum(float(smooth[j]) for j in proposed) + density * 0.40 * sum(
+                ((span - desired) / desired) ** 2 for span in spans
+            )
+            if best is None or score < best:
+                best = score
+                cuts = list(proposed)
+        if cuts is None:
+            raise ValueError(
+                "Cannot identify plausible splits. Write the digits with more space."
+            )
+    edges = [0, *cuts, width]
+    result = []
+    for a, b in zip(edges[:-1], edges[1:]):
+        if b - a < max(5, width / (max_digits * 3)):
+            raise ValueError("Detected an implausibly narrow digit region.")
+        part = mask[top:bottom, left + a : left + b]
+        ys, xs = np.where(part > 0)
+        if ys.size < 10:
+            raise ValueError("A proposed digit region contains too little ink.")
+        x0 = left + a + int(xs.min())
+        x1 = left + a + int(xs.max()) + 1
+        y0 = top + int(ys.min())
+        y1 = top + int(ys.max()) + 1
+        # Binarized crop eliminates ruled-paper/shadow artifacts before the
+        # per-digit pipeline; use visible foreground for white-paper style.
+        data = part[
+            int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1
+        ]
+        # NB: x is local to the segment.
+        pad = max(5, round(0.23 * max(data.shape)))
+        crop = np.full(
+            (data.shape[0] + 2 * pad, data.shape[1] + 2 * pad),
+            background_fill,
+            dtype=np.uint8,
+        )
+        if background_fill == 255:
+            crop[pad : pad + data.shape[0], pad : pad + data.shape[1]] = 255 - data
+        else:
+            crop[pad : pad + data.shape[0], pad : pad + data.shape[1]] = data
+        sx = ow / w
+        sy = oh / h
+        result.append(
+            DigitSegment(
+                Image.fromarray(crop),
+                (round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy)),
+            )
+        )
+    if not 2 <= len(result) <= max_digits:
+        raise ValueError(f"Detected {len(result)} regions, expected 2–{max_digits}.")
+    return result

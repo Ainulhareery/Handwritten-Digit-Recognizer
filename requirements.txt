@@ -5,3 +5,4 @@ numpy
 Pillow
 pandas
 streamlit-drawable-canvas[image]==0.13.0
+opencv-python-headless

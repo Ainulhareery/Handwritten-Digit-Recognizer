@@ -1,4 +1,7 @@
+# Project imports must follow PROJECT_ROOT setup.
+# ruff: noqa: E402
 
+import logging
 import sys
 from pathlib import Path
 
@@ -8,7 +11,6 @@ import streamlit as st
 from PIL import Image, ImageOps
 from streamlit_drawable_canvas import st_canvas
 
-
 # ---------------------------------
 # 1. Set up project imports
 # ---------------------------------
@@ -17,9 +19,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.preprocessing import preprocess_image
+from src.image_quality import enhance_photo
 from src.inference import predict_digit
+from src.multi_digit import recognize_number
+from src.preprocessing import preprocess_image
+from src.visualization import annotate_regions
 
+# Application logger
+logger = logging.getLogger(__name__)
 
 # ---------------------------------
 # 2. Streamlit configuration
@@ -32,10 +39,7 @@ st.set_page_config(
 
 st.title("Handwritten Digit Recognizer")
 
-st.write(
-    "Draw or upload a handwritten digit from 0 to 9 "
-    "and let the AI recognize it."
-)
+st.write("Draw or upload a handwritten digit from 0 to 9 and let the AI recognize it.")
 
 
 # ---------------------------------
@@ -119,10 +123,13 @@ def preprocess_drawing(image_data):
     )
 
     # Normalize pixels for the CNN
-    array = np.asarray(
-        processed,
-        dtype=np.float32,
-    ) / 255.0
+    array = (
+        np.asarray(
+            processed,
+            dtype=np.float32,
+        )
+        / 255.0
+    )
 
     model_input = array.reshape(1, 28, 28, 1)
 
@@ -164,17 +171,11 @@ if st.button(
 ):
     try:
         if canvas.image_data is None:
-            raise ValueError(
-                "Please draw a digit on the canvas."
-            )
+            raise ValueError("Please draw a digit on the canvas.")
 
-        processed, model_input = preprocess_drawing(
-            canvas.image_data
-        )
+        processed, model_input = preprocess_drawing(canvas.image_data)
 
-        predicted_digit, scores = predict_digit(
-            model_input
-        )
+        predicted_digit, scores = predict_digit(model_input)
 
         # Save the result so it remains visible
         st.session_state.drawing_result = {
@@ -187,26 +188,19 @@ if st.button(
         st.session_state.drawing_result = None
         st.warning(str(error))
 
-    except Exception as error:
+    except Exception:
         st.session_state.drawing_result = None
-        st.error(
-            "Could not process the drawing. "
-            "Please try again."
-        )
-        st.exception(error)
+        logger.exception("Single-digit drawing recognition failed")
+        st.error("Could not process the drawing. Please try again.")
 
 
 # ---------------------------------
 # 7. Display saved drawing result
 # ---------------------------------
 if st.session_state.drawing_result is not None:
-
     result = st.session_state.drawing_result
 
-    st.success(
-        f"The AI predicts your drawing is: "
-        f"**{result['digit']}**"
-    )
+    st.success(f"The AI predicts your drawing is: **{result['digit']}**")
 
     st.image(
         result["image"],
@@ -214,10 +208,7 @@ if st.session_state.drawing_result is not None:
         width=150,
     )
 
-    st.write(
-        f"Highest model score: "
-        f"**{result['score']:.2%}**"
-    )
+    st.write(f"Highest model score: **{result['score']:.2%}**")
 
     st.caption(
         "This score is the model's softmax output, "
@@ -257,11 +248,10 @@ uploaded_file = st.file_uploader(
 # ---------------------------------
 if uploaded_file is not None:
     try:
-
         # Correct camera orientation metadata
-        original_image = ImageOps.exif_transpose(
-            Image.open(uploaded_file)
-        ).convert("RGB")
+        original_image = ImageOps.exif_transpose(Image.open(uploaded_file)).convert(
+            "RGB"
+        )
 
         # Allow the user to rotate their photo
         rotation = st.selectbox(
@@ -288,9 +278,7 @@ if uploaded_file is not None:
 
         # Existing preprocessing handles
         # background inversion and digit extraction
-        processed_image, model_input = preprocess_image(
-            original_image
-        )
+        processed_image, model_input = preprocess_image(original_image)
 
         col1, col2 = st.columns(2)
 
@@ -309,9 +297,7 @@ if uploaded_file is not None:
             )
 
         # Predict using the existing CNN
-        predicted_digit, scores = predict_digit(
-            model_input
-        )
+        predicted_digit, scores = predict_digit(model_input)
 
         highest_score = float(scores[predicted_digit])
 
@@ -323,9 +309,7 @@ if uploaded_file is not None:
             value=str(predicted_digit),
         )
 
-        st.write(
-            f"Highest model score: **{highest_score:.2%}**"
-        )
+        st.write(f"Highest model score: **{highest_score:.2%}**")
 
         st.caption(
             "This score is the model's softmax output, "
@@ -346,18 +330,216 @@ if uploaded_file is not None:
     except (ValueError, OSError, TypeError) as error:
         st.error(f"Could not process this image: {error}")
 
-    except Exception as error:
-        st.error(
-            "Prediction failed. Check the model "
-            "and application configuration."
-        )
-        st.exception(error)
+    except Exception:  # noqa: BLE001
+        logger.exception("Single-digit image upload prediction failed")
+        st.error("We couldn't process this image. Please try another image.")
 
 else:
     st.info(
         "Upload an image above to begin. "
         "The application recognizes one digit at a time."
     )
+
+# ---------------------------------
+# Experimental: multi-digit recognition
+# ---------------------------------
+st.divider()
+st.subheader("🔢 Recognize a Handwritten Number (Experimental)")
+st.caption(
+    "Supports 2–5 clearly separated digits. Touching digits, "
+    "overlapping handwriting and complex photographs may fail."
+)
+
+if "multi_canvas_version" not in st.session_state:
+    st.session_state.multi_canvas_version = 0
+if "multi_result" not in st.session_state:
+    st.session_state.multi_result = None
+
+
+def clear_multi_digit():
+    st.session_state.multi_canvas_version += 1
+    st.session_state.multi_result = None
+
+
+multi_mode = st.radio(
+    "Choose an input method",
+    ["Draw a number", "Upload a number"],
+    horizontal=True,
+    key="multi_mode",
+)
+
+with st.expander("Recognition options (optional)"):
+    digit_count_option = st.selectbox(
+        "How many digits are written?",
+        ["Automatic", "2", "3", "4", "5"],
+        key="multi_digit_count_option",
+        help="Choose a count only if automatic segmentation merges or misses digits.",
+    )
+    enhance_weak_photo = (
+        st.checkbox(
+            "Try improving a faint/blurry photo (experimental)",
+            value=False,
+            key="multi_photo_enhance",
+            help="This can help or make things worse. It cannot restore lost detail.",
+        )
+        if multi_mode == "Upload a number"
+        else False
+    )
+
+expected_count = None if digit_count_option == "Automatic" else int(digit_count_option)
+
+
+multi_source = None
+if multi_mode == "Draw a number":
+    drawn_number = st_canvas(
+        fill_color="rgba(255, 255, 255, 0)",
+        stroke_width=14,
+        stroke_color="#000000",
+        background_color="#FFFFFF",
+        drawing_mode="freedraw",
+        update_streamlit=True,
+        return_image_data=True,
+        width=420,
+        height=160,
+        key=f"multi_canvas_{st.session_state.multi_canvas_version}",
+    )
+    if drawn_number.image_data is not None:
+        multi_source = Image.fromarray(
+            np.asarray(drawn_number.image_data, dtype=np.uint8)
+        )
+
+
+else:
+    number_upload = st.file_uploader(
+        "Upload a photo showing 2–5 separated handwritten digits",
+        type=["png", "jpg", "jpeg"],
+        key=f"multi_upload_{st.session_state.multi_canvas_version}",
+    )
+
+    if number_upload is not None:
+        original_number_image = ImageOps.exif_transpose(
+            Image.open(number_upload)
+        ).convert("RGB")
+
+        # Rotation is optional, not required
+        with st.expander("Adjust image orientation (optional)"):
+            multi_rotation = st.selectbox(
+                "Rotate only if the image is sideways",
+                [
+                    "No rotation",
+                    "90° clockwise",
+                    "90° counterclockwise",
+                    "180°",
+                ],
+                key="multi_rotation",
+            )
+
+        angles = {
+            "No rotation": 0,
+            "90° clockwise": -90,
+            "90° counterclockwise": 90,
+            "180°": 180,
+        }
+
+        multi_source = original_number_image.rotate(
+            angles[multi_rotation],
+            expand=True,
+        )
+
+        st.subheader("Uploaded Image")
+        st.image(
+            multi_source,
+            caption="Image submitted for recognition",
+            use_container_width=True,
+        )
+
+
+# ---------------------------------
+# Recognize multi-digit number
+# ---------------------------------
+if st.button("Recognize Number", type="primary", key="multi_predict"):
+    st.session_state.multi_result = None
+
+    if multi_source is None:
+        st.warning("Draw a number or upload an image first.")
+
+    else:
+        try:
+            # Apply enhancement only when requested for uploads
+            image_for_prediction = (
+                enhance_photo(multi_source)
+                if enhance_weak_photo and multi_mode == "Upload a number"
+                else multi_source
+            )
+
+            # Recognize individual digits and combine results
+            number, details = recognize_number(
+                image_for_prediction,
+                predict_fn=predict_digit,
+                max_digits=5,
+                expected_digits=expected_count,
+                canvas_mode=multi_mode == "Draw a number",
+            )
+
+            # Draw bounding boxes only once
+            annotated = annotate_regions(multi_source, details)
+
+            # Save results for display
+            st.session_state.multi_result = {
+                "number": number,
+                "digits": details,
+                "mode": multi_mode,
+                "annotated": annotated,
+            }
+
+        except ValueError as error:
+            st.warning(str(error))
+
+        except Exception:
+            logger.exception("Multi-digit recognition failed")
+            st.error(
+                "Could not recognize this number. "
+                "Please try again with a clearer image."
+            )
+
+
+# ---------------------------------
+# Display recognition result
+# ---------------------------------
+result = st.session_state.multi_result
+
+if result is not None and result["mode"] == multi_mode:
+    st.success(f"Recognized number: **{result['number']}**")
+
+    st.subheader("Detected Digit Regions")
+
+    st.image(
+        result["annotated"],
+        caption="Red boxes show the regions extracted for recognition",
+        use_container_width=True,
+    )
+
+    st.write(f"Number of detected regions: {len(result['digits'])}")
+
+    st.image(
+        [item["processed"] for item in result["digits"]],
+        caption=[
+            f"Digit {i + 1}: {item['digit']}" for i, item in enumerate(result["digits"])
+        ],
+        width=90,
+    )
+    st.caption(
+        "This is an experimental multi-digit prediction. "
+        "Scores from the CNN are not calibrated probabilities."
+    )
+
+st.button(
+    "Clear Number",
+    type="secondary",
+    icon="🧽",
+    key="multi_clear",
+    on_click=clear_multi_digit,
+)
 
 
 # ---------------------------------

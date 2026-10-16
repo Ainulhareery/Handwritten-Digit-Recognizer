@@ -43,13 +43,22 @@ def preprocess_image(image: Image.Image) -> tuple[Image.Image, np.ndarray]:
             y, x = stack.pop()
             component.append((y, x))
             for dy, dx in (
-                (-1, -1), (-1, 0), (-1, 1),
-                (0, -1), (0, 1),
-                (1, -1), (1, 0), (1, 1),
+                (-1, -1),
+                (-1, 0),
+                (-1, 1),
+                (0, -1),
+                (0, 1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
             ):
                 ny, nx = y + dy, x + dx
-                if (0 <= ny < height and 0 <= nx < width
-                        and mask[ny, nx] and not visited[ny, nx]):
+                if (
+                    0 <= ny < height
+                    and 0 <= nx < width
+                    and mask[ny, nx]
+                    and not visited[ny, nx]
+                ):
                     visited[ny, nx] = True
                     stack.append((ny, nx))
 
@@ -85,16 +94,20 @@ def preprocess_image(image: Image.Image) -> tuple[Image.Image, np.ndarray]:
     digit_pixels = np.zeros((height, width), dtype=np.uint8)
     strengths = contrast[ys, xs]
     peak = max(30.0, float(np.percentile(strengths, 98)))
-    values = np.clip(
-        (strengths - threshold * 0.35) / (peak - threshold * 0.35),
-        0, 1,
-    ) * 255
+    values = (
+        np.clip(
+            (strengths - threshold * 0.35) / (peak - threshold * 0.35),
+            0,
+            1,
+        )
+        * 255
+    )
     digit_pixels[ys, xs] = values.astype(np.uint8)
 
     digit = Image.fromarray(
         digit_pixels[
-            int(ys.min()): int(ys.max()) + 1,
-            int(xs.min()): int(xs.max()) + 1,
+            int(ys.min()) : int(ys.max()) + 1,
+            int(xs.min()) : int(xs.max()) + 1,
         ]
     )
     digit.thumbnail((20, 20), Image.Resampling.LANCZOS)
